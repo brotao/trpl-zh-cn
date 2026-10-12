@@ -1,14 +1,21 @@
 name: Build EPUB
 
 on:
-  workflow_dispatch:
   push:
     branches:
       - main
       - master
+    paths:
+      - 'src/**'
+      - 'epub-builder/**'
+      - 'epub.css'
+      - 'ferris.css'
+      - '.github/workflows/build-epub.yml'
+  workflow_dispatch: # 允许在 GitHub 页面手动触发构建
 
 jobs:
   build-epub:
+    name: Build and Package EPUB
     runs-on: ubuntu-latest
     env:
       LANG: zh_CN.UTF-8
@@ -17,100 +24,40 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install dependencies (pandoc + Chinese fonts)
+      - name: Install system dependencies (Pandoc & Chinese fonts)
         run: |
           sudo apt-get update
+          # 安装 pandoc 用于底层转换，安装中文字体确保 EPUB 渲染正常
           sudo apt-get install -y pandoc fonts-noto-cjk
 
-      - name: Gather markdown files from src/SUMMARY.md
-        id: gather
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          # 缓存 epub-builder 的依赖，加速后续构建
+          workspaces: "epub-builder"
+
+      - name: Build EPUB using project's Rust builder
         run: |
-          python3 - <<'PY'
-          import re, sys
-          from pathlib import Path
+          echo "Starting EPUB build process..."
+          cargo run --release --manifest-path epub-builder/Cargo.toml
 
-          root = Path("src")
-          summary = root / "SUMMARY.md"
-          if not summary.exists():
-              print("ERROR: src/SUMMARY.md not found", file=sys.stderr)
-              sys.exit(1)
-
-          text = summary.read_text(encoding="utf-8")
-          seen = set()
-          files = []
-          for m in re.findall(r'\(([^)]+\.md)\)', text):
-              p = (root / m).resolve()
-              # allow links that are already absolute/relative; normalize to repo-relative
-              rel = Path("src") / Path(m)
-              if rel.exists() and str(rel) not in seen:
-                  seen.add(str(rel))
-                  files.append(str(rel))
-              else:
-                  # try raw path without src/ if user listed full path
-                  alt = Path(m)
-                  if alt.exists() and str(alt) not in seen:
-                      seen.add(str(alt))
-                      files.append(str(alt))
-          if not files:
-              print("ERROR: no markdown files found in src/SUMMARY.md", file=sys.stderr)
-              sys.exit(1)
-          # Print as a NUL-separated list to be safe with spaces
-          print("\0".join(files))
-          PY
-        shell: bash
-
-      - name: Build EPUB with pandoc
+      - name: Verify EPUB generation
         run: |
-          # read NUL-separated list
-          files_raw="${{ steps.gather.outputs.stdout || '' }}"
-          if [ -z "$files_raw" ]; then
-            # fallback: the previous step printed to stdout; capture it directly
-            files_raw=$(python3 - <<'PY'
-import re, sys
-from pathlib import Path
-root = Path("src")
-text = (root / "SUMMARY.md").read_text(encoding="utf-8")
-seen = set()
-files = []
-for m in re.findall(r'\(([^)]+\\.md)\\)', text):
-    rel = Path("src") / Path(m)
-    if rel.exists() and str(rel) not in seen:
-        seen.add(str(rel))
-        files.append(str(rel))
-print("\0".join(files))
-PY
-)
-          fi
-
-          # convert NUL-separated to space-separated, preserving spaces in names
-          IFS=$'\0' read -r -a arr <<< "$files_raw"
-          if [ ${#arr[@]} -eq 0 ]; then
-            echo "No files found to build" >&2
+          if [ ! -f "rust_programming_language.epub" ]; then
+            echo "❌ Error: rust_programming_language.epub was not generated!"
             exit 1
           fi
-
-          echo "Files to include in EPUB:"
-          for f in "${arr[@]}"; do echo " - $f"; done
-
-          # optional: use cover image if exists at src/cover.png
-          COVER=""
-          if [ -f src/cover.png ]; then
-            COVER="--epub-cover-image=src/cover.png"
-            echo "Found cover: src/cover.png"
-          fi
-
-          # Build command
-          pandoc "${arr[@]}" \
-            -f markdown -t epub3 \
-            --toc --toc-depth=2 -N \
-            --metadata title="Rust 程序设计语言" \
-            --metadata language=zh-CN \
-            --epub-chapter-level=2 \
-            $COVER \
-            -o trpl-zh-cn.epub
+          echo "✅ Successfully generated:"
+          ls -lh rust_programming_language.epub
 
       - name: Upload EPUB artifact
         uses: actions/upload-artifact@v4
         with:
-          name: trpl-zh-cn-epub
-          path: trpl-zh-cn.epub
+          name: rust_programming_language_zh-CN
+          path: rust_programming_language.epub
+          retention-days: 30 # 保留 30 天，也可根据需要调整
