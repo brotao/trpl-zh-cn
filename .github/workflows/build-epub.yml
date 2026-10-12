@@ -1,0 +1,116 @@
+name: Build EPUB
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  build-epub:
+    runs-on: ubuntu-latest
+    env:
+      LANG: zh_CN.UTF-8
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies (pandoc + Chinese fonts)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pandoc fonts-noto-cjk
+
+      - name: Gather markdown files from src/SUMMARY.md
+        id: gather
+        run: |
+          python3 - <<'PY'
+          import re, sys
+          from pathlib import Path
+
+          root = Path("src")
+          summary = root / "SUMMARY.md"
+          if not summary.exists():
+              print("ERROR: src/SUMMARY.md not found", file=sys.stderr)
+              sys.exit(1)
+
+          text = summary.read_text(encoding="utf-8")
+          seen = set()
+          files = []
+          for m in re.findall(r'\(([^)]+\.md)\)', text):
+              p = (root / m).resolve()
+              # allow links that are already absolute/relative; normalize to repo-relative
+              rel = Path("src") / Path(m)
+              if rel.exists() and str(rel) not in seen:
+                  seen.add(str(rel))
+                  files.append(str(rel))
+              else:
+                  # try raw path without src/ if user listed full path
+                  alt = Path(m)
+                  if alt.exists() and str(alt) not in seen:
+                      seen.add(str(alt))
+                      files.append(str(alt))
+          if not files:
+              print("ERROR: no markdown files found in src/SUMMARY.md", file=sys.stderr)
+              sys.exit(1)
+          # Print as a NUL-separated list to be safe with spaces
+          print("\0".join(files))
+          PY
+        shell: bash
+
+      - name: Build EPUB with pandoc
+        run: |
+          # read NUL-separated list
+          files_raw="${{ steps.gather.outputs.stdout || '' }}"
+          if [ -z "$files_raw" ]; then
+            # fallback: the previous step printed to stdout; capture it directly
+            files_raw=$(python3 - <<'PY'
+import re, sys
+from pathlib import Path
+root = Path("src")
+text = (root / "SUMMARY.md").read_text(encoding="utf-8")
+seen = set()
+files = []
+for m in re.findall(r'\(([^)]+\\.md)\\)', text):
+    rel = Path("src") / Path(m)
+    if rel.exists() and str(rel) not in seen:
+        seen.add(str(rel))
+        files.append(str(rel))
+print("\0".join(files))
+PY
+)
+          fi
+
+          # convert NUL-separated to space-separated, preserving spaces in names
+          IFS=$'\0' read -r -a arr <<< "$files_raw"
+          if [ ${#arr[@]} -eq 0 ]; then
+            echo "No files found to build" >&2
+            exit 1
+          fi
+
+          echo "Files to include in EPUB:"
+          for f in "${arr[@]}"; do echo " - $f"; done
+
+          # optional: use cover image if exists at src/cover.png
+          COVER=""
+          if [ -f src/cover.png ]; then
+            COVER="--epub-cover-image=src/cover.png"
+            echo "Found cover: src/cover.png"
+          fi
+
+          # Build command
+          pandoc "${arr[@]}" \
+            -f markdown -t epub3 \
+            --toc --toc-depth=2 -N \
+            --metadata title="Rust 程序设计语言" \
+            --metadata language=zh-CN \
+            --epub-chapter-level=2 \
+            $COVER \
+            -o trpl-zh-cn.epub
+
+      - name: Upload EPUB artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: trpl-zh-cn-epub
+          path: trpl-zh-cn.epub
